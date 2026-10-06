@@ -1,4 +1,9 @@
-//! 发布计划的**灰度阶梯**：由「目标 + 阶段数」切出**互不重叠**的阶段（服务端权威口径）。
+//! 发布计划的**灰度**：两件事共用一份口径。
+//!
+//! 1. **怎么切阶段** —— [`plan_phases`]：由「目标 + 阶段数」切出**互不重叠**的阶段
+//!    （服务端权威，中心与网关都只让运维选阶段数）。
+//! 2. **怎么放行** —— [`phase_should_advance`] / [`next_refill_targets`] 等：阶段推进闸门与批次节流；
+//!    以及一个 target 物化成工作时的**确定性 id**（[`target_work_id`]），配合幂等落库。
 //!
 //! 固定阶梯 **1 个（金丝雀）→ 10% → 30% → 70% → 全量（剩余）**：选 K 个阶段时取阶梯前 K-1 级
 //! 作为中间切点，最后一级永远是「剩余全部」，保证一把铺满目标。运维只选**阶段数**，不用填任何
@@ -137,6 +142,140 @@ fn cut_size(cut: CoverageCut, total: usize) -> usize {
     }
 }
 
+// ─────────────────────────── 推进闸门与批次节流 ───────────────────────────
+//
+// 切阶段只说「分几段、每段是谁」；下面这些决定「一段什么时候算了结、能不能进下一段、
+// 段内一次放几台」。同一份口径，中心（算阶段）与网关（放行/物化）共用。
+
+/// 阶段推进闸门的合法取值。
+pub const ADVANCE_RULE_MANUAL: &str = "manual";
+pub const ADVANCE_RULE_ALL_SUCCEEDED: &str = "all_succeeded";
+/// `success_rate:<NN>` 前缀（成功率阈值，0..=100）。
+pub const ADVANCE_RULE_SUCCESS_RATE_PREFIX: &str = "success_rate:";
+
+/// 校验推进闸门是否合法。
+///
+/// 取值是 `manual` / `all_succeeded` / `success_rate:<0..=100>`。
+pub fn validate_advance_rule(rule: &str) -> Result<(), String> {
+    let rule = rule.trim();
+    if rule == ADVANCE_RULE_MANUAL || rule == ADVANCE_RULE_ALL_SUCCEEDED {
+        return Ok(());
+    }
+    if let Some(rate) = rule.strip_prefix(ADVANCE_RULE_SUCCESS_RATE_PREFIX)
+        && let Ok(value) = rate.trim().parse::<u32>()
+        && value <= 100
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "advance_rule {rule:?} must be \"manual\", \"all_succeeded\", or \"success_rate:<0..=100>\""
+    ))
+}
+
+/// 目标上报的工作状态 → 计划条目的状态。
+///
+/// `running` 等「在飞」状态都归 `dispatched`（条目只区分「还没做 / 在做 / 做成了 / 没成」）；
+/// `rolled_back` 在上报侧已映射成 `failed`，这里不单列。
+pub fn entry_status_for(work_status: &str) -> &'static str {
+    match work_status {
+        "succeeded" => "succeeded",
+        "failed" => "failed",
+        _ => "dispatched",
+    }
+}
+
+/// 一个目标的条目状态：`(target_id, status)`。
+pub type TargetStatus<'a> = (&'a str, &'a str);
+
+/// 阶段是否已**全部了结**：每个目标都到了 `succeeded` / `failed` 终态。
+///
+/// 空阶段不算了结 —— `all` 在空集上恒真，那会把「一个目标都没有的阶段」当成可推进。
+pub fn phase_settled(statuses: &[&str]) -> bool {
+    !statuses.is_empty()
+        && statuses
+            .iter()
+            .all(|status| matches!(*status, "succeeded" | "failed"))
+}
+
+/// 阶段推进闸门是否放行（自动推进判定）。
+///
+/// 前提是阶段**全部了结**才谈推进：还有目标在飞就没出结果，不能拿半截结果判「成没成」。
+/// [`ADVANCE_RULE_MANUAL`] 永远不自动放行（要人工确认）。
+pub fn phase_should_advance(rule: &str, statuses: &[&str]) -> bool {
+    if !phase_settled(statuses) {
+        return false;
+    }
+    let total = statuses.len() as u64;
+    let succeeded = statuses
+        .iter()
+        .filter(|status| **status == "succeeded")
+        .count() as u64;
+    match rule.trim() {
+        ADVANCE_RULE_MANUAL => false,
+        ADVANCE_RULE_ALL_SUCCEEDED => succeeded == total,
+        _ => {
+            if let Some(rate) = rule.trim().strip_prefix(ADVANCE_RULE_SUCCESS_RATE_PREFIX)
+                && let Ok(threshold) = rate.trim().parse::<u64>()
+            {
+                // succeeded / total >= threshold / 100，全程整数，避免浮点误差。
+                return succeeded * 100 >= threshold * total;
+            }
+            false
+        }
+    }
+}
+
+/// 阶段开始时先物化哪些目标：`batch_size <= 0` = 全量；否则最多前 `batch_size` 个。
+pub fn phase_start_targets(target_ids: &[String], batch_size: i64) -> Vec<String> {
+    if batch_size <= 0 {
+        return target_ids.to_vec();
+    }
+    let take = (batch_size as usize).min(target_ids.len());
+    target_ids[..take].to_vec()
+}
+
+/// 阶段内补够 `batch_size` 台在飞：从还是 `pending` 的目标里再挑下一批物化。
+///
+/// 只补「在飞数 < batch_size」的差额；`batch_size <= 0` = 不节流，不需要补。
+pub fn next_refill_targets(
+    target_ids: &[String],
+    states: &[TargetStatus<'_>],
+    batch_size: i64,
+) -> Vec<String> {
+    if batch_size <= 0 {
+        return Vec::new();
+    }
+    let status_of = |target: &str| -> Option<&str> {
+        states
+            .iter()
+            .find(|(id, _)| *id == target)
+            .map(|(_, status)| *status)
+    };
+    let in_flight = target_ids
+        .iter()
+        .filter(|target| status_of(target) == Some("dispatched"))
+        .count();
+    let needed = (batch_size as usize).saturating_sub(in_flight);
+    if needed == 0 {
+        return Vec::new();
+    }
+    target_ids
+        .iter()
+        .filter(|target| status_of(target) == Some("pending"))
+        .take(needed)
+        .cloned()
+        .collect()
+}
+
+/// 计划里一个目标物化成的那件一次性工作的 `work_id`。
+///
+/// **确定性**（不含时间）：同一目标重试物化会得到同一个 `work_id`，配合落库的 upsert 幂等 ——
+/// 不会因为推进重试而给同一目标并出两件升级。
+pub fn target_work_id(plan_id: &str, target_id: &str) -> String {
+    let digest = crate::package::sha256_hex_bytes(format!("{plan_id}|{target_id}").as_bytes());
+    format!("work-{plan_id}-{}", &digest[..12])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +412,95 @@ mod tests {
         assert_eq!(phase_scale_label(&phases[0]), "1 个（金丝雀）");
         assert_eq!(phase_scale_label(&phases[1]), "覆盖 ~10%");
         assert_eq!(phase_scale_label(&phases[3]), "覆盖 ~100%");
+    }
+
+    #[test]
+    fn advance_rules_accept_the_documented_values_and_reject_garbage() {
+        for ok in [
+            "manual",
+            "all_succeeded",
+            "success_rate:0",
+            "success_rate:80",
+            "success_rate:100",
+        ] {
+            assert!(validate_advance_rule(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "auto",
+            "success_rate:101",
+            "success_rate:abc",
+            "rate:50",
+        ] {
+            assert!(validate_advance_rule(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn entry_status_folds_in_flight_and_terminal_onto_the_closed_set() {
+        assert_eq!(entry_status_for("succeeded"), "succeeded");
+        assert_eq!(entry_status_for("failed"), "failed");
+        for flying in ["running", "dispatched", "accepted"] {
+            assert_eq!(entry_status_for(flying), "dispatched", "{flying}");
+        }
+    }
+
+    #[test]
+    fn a_phase_advances_only_when_settled_and_the_rule_holds() {
+        // 没全部了结就不放行（还有在飞的）。
+        let in_flight = ["succeeded", "dispatched"];
+        assert!(!phase_should_advance("all_succeeded", &in_flight));
+        assert!(!phase_should_advance("success_rate:50", &in_flight));
+
+        let all_ok = ["succeeded", "succeeded"];
+        assert!(phase_should_advance("all_succeeded", &all_ok));
+        assert!(phase_should_advance("success_rate:100", &all_ok));
+
+        let one_failed = ["succeeded", "failed"];
+        assert!(!phase_should_advance("all_succeeded", &one_failed));
+        assert!(phase_should_advance("success_rate:50", &one_failed));
+        assert!(!phase_should_advance("success_rate:51", &one_failed));
+
+        // manual 永不自动放行；空阶段不算了结。
+        assert!(!phase_should_advance("manual", &all_ok));
+        assert!(!phase_should_advance("all_succeeded", &[]));
+    }
+
+    #[test]
+    fn start_and_refill_keep_the_batch_in_flight() {
+        let fleet = ["a", "b", "c", "d"].map(str::to_string).to_vec();
+        // 0 = 不节流，全量；N = 前 N 个。
+        assert_eq!(phase_start_targets(&fleet, 0), vec!["a", "b", "c", "d"]);
+        assert_eq!(phase_start_targets(&fleet, 2), vec!["a", "b"]);
+        assert_eq!(phase_start_targets(&fleet, 10), vec!["a", "b", "c", "d"]);
+
+        // a 在飞、b/c/d 还 pending，batch=2 → 还差 1 台，补 b。
+        let states = [
+            ("a", "dispatched"),
+            ("b", "pending"),
+            ("c", "pending"),
+            ("d", "pending"),
+        ];
+        assert_eq!(next_refill_targets(&fleet, &states, 2), vec!["b"]);
+        // a、b 都结束了 → 补 c、d。
+        let states = [
+            ("a", "succeeded"),
+            ("b", "failed"),
+            ("c", "pending"),
+            ("d", "pending"),
+        ];
+        assert_eq!(next_refill_targets(&fleet, &states, 2), vec!["c", "d"]);
+        // 不节流：补什么都不用。
+        assert!(next_refill_targets(&fleet, &states, 0).is_empty());
+    }
+
+    #[test]
+    fn work_id_is_deterministic_per_target() {
+        let id = target_work_id("plan-1", "gw-001");
+        assert_eq!(id, target_work_id("plan-1", "gw-001"));
+        assert_ne!(id, target_work_id("plan-1", "gw-002"));
+        assert_ne!(id, target_work_id("plan-2", "gw-001"));
+        assert!(id.starts_with("work-plan-1-"));
+        assert_eq!(id.len(), "work-plan-1-".len() + 12);
     }
 }

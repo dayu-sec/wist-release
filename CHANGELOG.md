@@ -3,6 +3,25 @@
 本文件记录 `wist-release` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-10-06
+
+`rollout` 补上「怎么放行」那一半：除了阶段切分（0.1.0 起），把**推进闸门 / 批次节流 / 条目
+状态折叠 / 确定性 work_id** 也从网关收进来。这些原本只活在网关（`app/rollout.rs`），
+而中心只算阶段、没有闸门语义 —— 收进来之后两边是同一套。
+
+### 新增
+
+- **推进闸门**：`validate_advance_rule`（`manual` / `all_succeeded` / `success_rate:<0..=100>`
+  及对应常量）、`phase_settled`（全终态才算了结，**空阶段不算**）、`phase_should_advance`
+  （成功率用**整数**比较避浮点误差；`manual` 永不自动放行）。
+- **批次节流**：`phase_start_targets`、`next_refill_targets`（`batch_size <= 0` = 不节流）。
+- **条目状态折叠**：`entry_status_for` —— 上报的工作状态归到
+  `dispatched` / `succeeded` / `failed`（条目只区分「还没做 / 在做 / 做成 / 没成」）。
+- **确定性 work id**：`target_work_id(plan_id, target_id)` = `work-<plan_id>-<sha256 前 12 位>`，
+  不含时间，配合落库的 upsert 幂等（同一目标重试物化不会并出两件升级）。
+- `TargetStatus<'a>`（`(target_id, status)`）：把「目标的状态表」作为入参形状定下来，
+  口径函数不依赖任何存储类型。
+
 ## [0.2.0] - 2026-10-06
 
 把「制品与发布计划」的口径再收窄一层：**路径安全、摘要、版本比较、取包入口**，让 agentd
