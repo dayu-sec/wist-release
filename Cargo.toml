@@ -16,7 +16,7 @@ categories = ["data-structures", "network-programming"]
 # sha256（裸 hex）。与两侧应用同源（ring）。
 ring = "0.17"
 # 拉取来源制品（本机路径直接读；https 走 reqwest）。rustls 后端，不引 C 依赖。
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-tls"] }
 # 读安装包顶层目录名取 version/arch；flate2 默认纯 Rust 后端（miniz_oxide）。
 flate2 = "1"
 tar = "0.4"
