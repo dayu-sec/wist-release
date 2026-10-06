@@ -3,6 +3,21 @@
 本文件记录 `wist-release` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-10-06
+
+### 变更
+
+- **底座换成 [`wist-artifact`] 0.1**：制品的**传输与校验**口径（取来源 / 摘要 / 版本比较 / 命名与
+  路径安全）下沉到新 crate；本 crate 的 `package` 模块**原样转出**（`pub use`）——
+  **公共 API 与调用点零变化**（`wist_release::package::read_verified_source` 等照旧）。
+- 本 crate 从此只装**发布域**：包身份解析（`read_package_identity` / `read_binary_package_identity`，
+  需要 `flate2` / `tar`）与发布计划（`rollout`）。**被管端（agentd）不再依赖本 crate** —— 它只需要
+  底座那一层，不必背发布域概念，也不会凭空多出解包依赖。
+- 顺带：本 crate 不再直接依赖 `ring`（摘要口径改用纯 Rust 的 `sha2`，在底座里）与 `reqwest`
+  （取来源也在底座里）。
+
+[`wist-artifact`]: https://crates.io/crates/wist-artifact
+
 ## [0.3.0] - 2026-10-06
 
 `rollout` 补上「怎么放行」那一半：除了阶段切分（0.1.0 起），把**推进闸门 / 批次节流 / 条目
