@@ -1,6 +1,6 @@
 [package]
 name = "wist-release"
-version = "0.1.0" #@gxl:set(version)
+version = "0.2.0" #@gxl:set(version)
 edition = "2024"
 license = "Apache-2.0"
 authors = ["wist Dev Team"]
@@ -15,8 +15,10 @@ categories = ["data-structures", "network-programming"]
 [dependencies]
 # sha256（裸 hex）。与两侧应用同源（ring）。
 ring = "0.17"
-# 拉取来源制品（本机路径直接读；https 走 reqwest）。rustls 后端，不引 C 依赖。
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# 拉取来源制品（本机路径直接读；URL 走 reqwest）。rustls 后端，不引 C 依赖。
+# 版本与 center / gwlinkd / agentd 对齐（它们都在 0.13）—— 这样 `read_source_with_client`
+# 才能接住调用方自己的 client（例如 agentd 的 mTLS 身份）。
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # 读安装包顶层目录名取 version/arch；flate2 默认纯 Rust 后端（miniz_oxide）。
 flate2 = "1"
 tar = "0.4"

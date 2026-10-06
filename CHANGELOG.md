@@ -3,6 +3,42 @@
 本文件记录 `wist-release` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-10-06
+
+把「制品与发布计划」的口径再收窄一层：**路径安全、摘要、版本比较、取包入口**，让 agentd
+也能用同一份（它以前是第四份实现，还自带一套哈希库）。
+
+### 新增
+
+- **路径段安全**：`is_safe_path_segment`（组件名 / 版本号 / 文件名必须真的只有一段）——
+  管理面发布与**未鉴权**的制品下载路由据此把 `..` 拒掉；`artifact_filename` 的回落名也保证
+  永远是安全段（此前只防来源末段，`component` / `version` 原样拼进去）。
+- **内容寻址 id 泛化**：`content_id(prefix, sha256_hex)`；`package_id_for_sha256` 即
+  `content_id("pkg", …)`，知识库包的 `kbp-` 也走同一份逻辑。
+- **取包入口按机制 / 策略分开**：
+  - `read_source_within(source, max_bytes, timeout)` —— 上限与超时由调用方给；
+  - `read_source_with_client(client, …)` —— **带入调用方自己的 client**（agentd 的 mTLS 身份靠它）；
+  - `read_local_source(path, max_bytes)` —— 只要本机路径那一支（不必为它构造 client）。
+- **`PackageError::TooLarge`**：来源超限单独一类，调用方可以回「太大了」而不是笼统的「拿不到」。
+- **摘要口径** `parse_digest`：可选 `sha256:` 前缀（大小写不敏感）、大小写不敏感、**校验 64 位 hex**；
+  `read_verified_source` 走它，因此「摘要填错」会给一句「这不像摘要」而不是等成一次「不相符」。
+- **版本比较** `parse_version` / `version_is_newer`：点分数字段逐段按**数值**比
+  （`0.10 > 0.9`、`0.1.0 > 0.1`），带 `-pre` / `+meta` 只看数字段；认不出来返回 `None`
+  （升级方向不可判时应当拒绝，不猜）。
+
+### 修复
+
+- **本机路径也受大小上限**：此前只有 http 分支会拦超限，`/abs/path` 会把任意大文件读进内存。
+- **`normalize_version` 认大写 `V`**：与解析侧 `looks_like_version` 同口径；此前包内自报 `V1.2.3`
+  与运维手输 `v1.2.3` 会被误判成版本不符。
+- **`triple_start` 不再被包名里的架构词骗**：`wist-arm-stack-1.2.3` 的 `-arm-` 曾被当作
+  target-triple 起头，导致版本整段丢掉；现在要求候选**前一段还能切出版本**。
+- **`plan_phases(targets, 0)` 报错**，而不是静默当成 1 阶段。
+
+### 变更（不兼容）
+
+- `PackageError` 多了 `TooLarge` 变体 —— 对它做穷举 `match` 的调用方需要补一支。
+
 ## [0.1.0] - 2026-10-06
 
 首个版本。

@@ -16,8 +16,18 @@
 
 | 模块      | 内容                                                                     |
 | --------- | ------------------------------------------------------------------------ |
-| `package` | 安装包内核：来源读取（本机路径 / https）、摘要校验、身份解析（version/arch）、内容寻址 id、制品命名 |
+| `package` | 安装包内核：来源读取（本机路径 / URL）、摘要校验、身份解析（version/arch）、内容寻址 id、制品命名、路径段安全、摘要与版本口径 |
 | `rollout` | 发布计划的灰度阶梯：由「目标 + 阶段数」切出互不重叠的阶段（1 → 10% → 30% → 70% → 全量） |
+
+`package` 里除了安装包身份，还有几个**同一套口径只该有一份**的小件：
+
+| 口径 | 入口 |
+| --- | --- |
+| 取来源（机制 / 策略分开） | `read_source`、`read_source_within`、`read_source_with_client`、`read_local_source` |
+| 摘要 | `sha256_hex_bytes`、`parse_digest`、`read_verified_source` |
+| 版本 | `normalize_version`、`parse_version`、`version_is_newer` |
+| 内容寻址 id | `content_id`、`package_id_for_sha256` |
+| 路径段安全 / 命名 | `is_safe_path_segment`、`artifact_filename` |
 
 ### `package` 的两套身份口径
 
