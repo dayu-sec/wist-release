@@ -3,6 +3,14 @@
 本文件记录 `wist-release` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-10-07
+
+### 新增
+
+- **发布计划 id 语义化**：`rollout::plan_id(action, unique)` 生成 `plan-<action>-<yyyyMMdd-HHmmss>-<short>`
+  —— 一眼能读「做什么 + 何时发的 + 短唯一后缀」，取代此前纯摘要式（`plan-<sha256>`）的 id。
+  同一秒内多发也不撞（短后缀取带纳秒的 `unique` 摘要前 6 位）。
+
 ## [0.3.2] - 2026-10-07
 
 ### 修复

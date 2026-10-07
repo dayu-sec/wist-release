@@ -283,6 +283,61 @@ pub fn target_work_id(plan_id: &str, target_id: &str) -> String {
     format!("work-{plan_id}-{}", &digest[..12])
 }
 
+/// 灰度发布计划的**语义化 id**：`plan-<action>-<yyyyMMdd-HHmmss>-<short>`。
+///
+/// `plan-<sha256>` 那种纯摘要看不出任何含义；这里让 id 一眼能读：**做什么 + 什么时候发的 + 短唯一后缀**。
+///
+/// - `action`：动作（如 `upgrade`）；非 `[A-Za-z0-9]` 折成 `-`（空则退化为 `rollout`）；
+/// - 时间戳取自 `unique` 前 19 个字符（`YYYY-MM-DDTHH:MM:SS`，UTC），折成 `yyyyMMdd-HHmmss`；
+/// - `short`：`sha256("<action>|<unique>")` 前 6 位 —— `unique` 用**带纳秒的 RFC3339**，
+///   同一秒内多发也不撞（旧实现就是拿整串时间戳做摘要，唯一性一致）。
+///
+/// 例：`plan_id("upgrade", "2026-10-07T10:53:12.345678+00:00")`
+///   → `plan-upgrade-20261007-105312-9f3a2c`
+pub fn plan_id(action: &str, unique: &str) -> String {
+    let digest = crate::package::sha256_hex_bytes(format!("{action}|{unique}").as_bytes());
+    format!(
+        "plan-{}-{}-{}",
+        plan_action_slug(action),
+        plan_stamp(unique),
+        &digest[..6]
+    )
+}
+
+/// id 里的动作片段：只留 `[A-Za-z0-9]`（小写），其余折成 `-`（不重复、不留首尾）；空则 `rollout`。
+fn plan_action_slug(action: &str) -> String {
+    let mut slug = String::new();
+    let mut dash = false;
+    for ch in action.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            dash = false;
+        } else if !slug.is_empty() && !dash {
+            slug.push('-');
+            dash = true;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        "rollout".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
+/// 从 RFC3339（UTC）前 19 个字符折出 `yyyyMMdd-HHmmss`；认不出就退回清洗后的串。
+fn plan_stamp(unique: &str) -> String {
+    let head: String = unique
+        .chars()
+        .take(19)
+        .filter(|ch| ch.is_ascii_digit() || *ch == 'T')
+        .collect();
+    match head.split_once('T') {
+        Some((date, time)) if date.len() == 8 && time.len() == 6 => format!("{date}-{time}"),
+        _ => head,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +348,23 @@ mod tests {
 
     fn sizes(phases: &[Phase]) -> Vec<usize> {
         phases.iter().map(|p| p.target_ids.len()).collect()
+    }
+
+    #[test]
+    fn plan_id_is_semantic_and_unique() {
+        let a = plan_id("upgrade", "2026-10-07T10:53:12.345678+00:00");
+        assert!(a.starts_with("plan-upgrade-20261007-105312-"), "{a}");
+        assert_eq!(a.len(), "plan-upgrade-20261007-105312-".len() + 6, "{a}");
+        // 同一秒、不同纳秒 → 不撞。
+        let b = plan_id("upgrade", "2026-10-07T10:53:12.999999+00:00");
+        assert_ne!(a, b);
+        assert!(b.starts_with("plan-upgrade-20261007-105312-"), "{b}");
+        // 动作里的非法字符折成 `-`；空动作退化为 `rollout`。
+        assert!(
+            plan_id("scale/rollout", "2026-10-07T10:53:12Z")
+                .starts_with("plan-scale-rollout-20261007-105312-")
+        );
+        assert!(plan_id("", "2026-10-07T10:53:12Z").starts_with("plan-rollout-20261007-105312-"));
     }
 
     #[test]
