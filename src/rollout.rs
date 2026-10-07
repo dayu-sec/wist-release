@@ -172,14 +172,21 @@ pub fn validate_advance_rule(rule: &str) -> Result<(), String> {
     ))
 }
 
-/// 目标上报的工作状态 → 计划条目的状态。
+/// 上报的工作状态 → 计划条目的状态（把各上报方的措辞归一化到条目闭集）。
 ///
-/// `running` 等「在飞」状态都归 `dispatched`（条目只区分「还没做 / 在做 / 做成了 / 没成」）；
-/// `rolled_back` 在上报侧已映射成 `failed`，这里不单列。
+/// 上报方的「成功 / 失败」并不都用同一套词：网关 → agent 的工作结果用 `succeeded` / `failed`；
+/// 网关升级（gwlinkd）的台账用 `done`（成功）/ `unverified`（执行器报成但未被佐证）/
+/// `rolled_back`（已回滚）/ `failed`。这里统一归一化 —— 否则某个措辞（如 `done`）会被折成
+/// `dispatched`：条目永不了结、阶段不算完成，升级**成功后**计划反而卡死。
+///
+/// - 成功：`succeeded` / `done`；
+/// - 失败：`failed` / `rolled_back` / `unverified`（未佐证的成功**不认成功**）；
+/// - 其余「在飞」状态（`running` / `dispatched` / `accepted` 等）归 `dispatched`
+///   （条目只区分「还没做 / 在做 / 做成了 / 没成」）。
 pub fn entry_status_for(work_status: &str) -> &'static str {
     match work_status {
-        "succeeded" => "succeeded",
-        "failed" => "failed",
+        "succeeded" | "done" => "succeeded",
+        "failed" | "rolled_back" | "unverified" => "failed",
         _ => "dispatched",
     }
 }
@@ -438,8 +445,13 @@ mod tests {
 
     #[test]
     fn entry_status_folds_in_flight_and_terminal_onto_the_closed_set() {
+        // 成功：`succeeded`（工作结果口径）与 `done`（gwlinkd 台账口径）同义。
         assert_eq!(entry_status_for("succeeded"), "succeeded");
-        assert_eq!(entry_status_for("failed"), "failed");
+        assert_eq!(entry_status_for("done"), "succeeded");
+        // 失败：`failed`，外加回滚与「报成但未佐证」。
+        for failed in ["failed", "rolled_back", "unverified"] {
+            assert_eq!(entry_status_for(failed), "failed", "{failed}");
+        }
         for flying in ["running", "dispatched", "accepted"] {
             assert_eq!(entry_status_for(flying), "dispatched", "{flying}");
         }

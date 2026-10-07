@@ -3,6 +3,16 @@
 本文件记录 `wist-release` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] - 2026-10-07
+
+### 修复
+
+- **`entry_status_for` 归一化各上报方的措辞**：此前只认 `succeeded` / `failed`，而 gwlinkd 的
+  网关升级台账用 `done`（成功）/ `unverified`（执行器报成但未被佐证）/ `rolled_back`（已回滚）。
+  这些措辞会被折成 `dispatched`，导致条目永不了结、阶段不算完成 —— 升级**成功后**计划反而卡在
+  `rolling`，人工推进又被闸门「阶段未了结」挡住。现归一化：`done → succeeded`，
+  `rolled_back` / `unverified → failed`（未佐证的成功**不认成功**）。
+
 ## [0.3.1] - 2026-10-06
 
 ### 变更
