@@ -1,6 +1,6 @@
 [package]
 name = "wist-release"
-version = "0.4.0" #@gxl:set(version)
+version = "0.5.0" #@gxl:set(version)
 edition = "2024"
 license = "Apache-2.0"
 authors = ["wist Dev Team"]
@@ -20,6 +20,8 @@ wist-artifact = { version = "0.1" }
 # 正因为只有这一层需要解包，被管端（agentd）才不该依赖本 crate。
 flate2 = "1"
 tar = "0.4"
+# 安装包结构（ReleasePackage / ReleaseArtifact）的序列化：两侧应用直接复用这些类型。
+serde = { version = "1", features = ["derive"] }
 
 [lib]
 path = "src/lib.rs"

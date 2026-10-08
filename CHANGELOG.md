@@ -3,6 +3,25 @@
 本文件记录 `wist-release` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-10-08
+
+### 新增
+
+- **发布计划的编排集中到本 crate**（新模块 `plan`）：把原先在 `wist-center` 与 `wist-gateway` 各
+  写一份的「建草稿（切段）/ 批准 / 推进闸门 / 推进 / 结果回填后自动推进 / 重试重开」收成一份
+  **与存储无关**的口径（`PhaseDraft` + 纯函数）。两仓只留薄适配器（本地记录 ↔ 中立形状）与各自的
+  物化 / spec 解析；**行为不变**。
+- **多平台安装包模型**（`package`）：新增 `ReleasePackage` / `ReleaseArtifact`（一个版本 × 多平台
+  制品）与平台判定 `platform_family` / `normalize_platform` / `missing_platforms` /
+  `validate_platforms` —— 中心的托管发布按「网关声明的平台」挑制品、网关的 agent 包按目标平台
+  解析，都基于这一份口径（gnu/musl 等 abi 差异归一化到同一平台家族）。
+
+### 修复
+
+- **`plan::reopen_for_retry` 不再无脑重开计划**：`retried` 里若有**不属于任何阶段**的目标，它们不
+  影响任何状态；只要**一个阶段都没被点到**，计划整体不动 —— 否则会把一份已收尾（`completed` /
+  `failed`）的计划重开为没有阶段可跑的 `rolling`，卡在滚动里等不到了结。
+
 ## [0.4.0] - 2026-10-07
 
 ### 新增

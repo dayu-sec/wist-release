@@ -30,20 +30,39 @@ pub use wist_artifact::version::{normalize_version, parse_version, version_is_ne
 /// 2. **部署栈包**：`<name>-<version>.tar.gz`，顶层是 `sys/…`（git archive，无包装目录）→ 回落文件名；
 /// 3. 读不出（临时文件名、无版本号、非 gzip 字节）→ 空串而**不报错**（仍能被托管与分发）。
 ///
+/// 版本与平台**分别取最可信的一方，可跨来源补齐**：
+/// - **版本**：包内顶层目录名切得出就用它（正规二进制包更可信），否则用来源文件名；
+/// - **平台**：目录名切得出 target-triple 就用它；切不出时**回落来源文件名** —— 如
+///   `galaxy-ops-v2.2.1-alpha-aarch64-apple-darwin.tar.gz` 顶层目录只有 `<name>-<version>`，
+///   平台只在文件名里。两边都切不出 → 留空（界面显示「通用」）。
+///
 /// 注意：回落到文件名时**不要求** target-triple（部署栈包的版本只体现在文件名里）。
-/// 反过来，一旦**目录名里能切出版本**（哪怕切不出架构），就直接用它、不再回落文件名 —— 二者取一，
-/// 不做合并。若调用方只认「带 target-triple 的二进制包」（如网关的 agent 安装包），用
+/// 若调用方只认「带 target-triple 的二进制包」（如网关的 agent 安装包），用
 /// [`read_binary_package_identity`]。
 pub fn read_package_identity(source: &str, bytes: &[u8]) -> (String, String) {
-    // 先看包内首条目目录名（正规二进制包在这里带身份）。
-    if let Some(dir) = first_tar_entry_component(bytes) {
-        let identity = parse_package_name(&dir);
-        if !identity.0.is_empty() {
-            return identity;
-        }
+    // 包内首条目目录名（正规二进制包在这里带身份）。
+    let from_dir = first_tar_entry_component(bytes).map(|dir| parse_package_name(&dir));
+    // 来源末段（部署栈包顶层不带身份，但文件名带版本 / target-triple）。
+    let from_name = parse_package_name(source_basename(source));
+
+    // 版本：目录名切得出优先，否则回落文件名。
+    let dir_version = from_dir
+        .as_ref()
+        .map(|(version, _)| version.clone())
+        .filter(|version| !version.is_empty());
+    let version = dir_version.unwrap_or(from_name.0);
+
+    // 平台：目录名切出 target-triple 优先，切不出回落文件名。
+    let arch = from_dir
+        .map(|(_, arch)| arch)
+        .filter(|arch| !arch.is_empty())
+        .unwrap_or(from_name.1);
+
+    // 版本都切不出 → 整体留空（调用方据此判断「读不出身份」）。
+    if version.is_empty() {
+        return (String::new(), String::new());
     }
-    // 回落用来源末段（部署栈包顶层不带身份，但文件名带版本）。
-    parse_package_name(source_basename(source))
+    (version, arch)
 }
 
 /// 二进制安装包的 `(version, arch)`（网关侧口径）。
@@ -181,6 +200,177 @@ fn strip_archive_suffix(name: &str) -> &str {
     name
 }
 
+// ── 安装包结构（版本 + 多平台制品） ──
+// 中心与网关共用：**类型 + 纯逻辑**；存储 / 端点 / 状态机留在各应用。
+
+use serde::{Deserialize, Serialize};
+
+/// 平台标识 = 目标三元组（target-triple），如 `aarch64-apple-darwin`。
+/// 本模块用 `Option<String>` 承载：无平台概念的包（如部署栈包）为 `None`。
+///
+/// 平台「家族」：按 OS + CPU 架构归并，**忽略 abi 后缀**（gnu / musl / gnueabihf…）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlatformFamily {
+    MacosArm,
+    MacosX86,
+    LinuxArm,
+    LinuxX86,
+    WindowsArm,
+    WindowsX86,
+}
+
+/// 规范化平台串：去空白 + 转小写（比较 / 去重用）。
+pub fn normalize_platform(triple: &str) -> String {
+    triple.trim().to_ascii_lowercase()
+}
+
+/// 把 target-triple 归到平台家族（OS + 架构）；认不出返回 `None`。
+pub fn platform_family(triple: &str) -> Option<PlatformFamily> {
+    let triple = normalize_platform(triple);
+    let arch = triple.split('-').next().unwrap_or("");
+    let is_arm = matches!(arch, "aarch64" | "arm64" | "armv8" | "armv7");
+    let is_x86 = matches!(arch, "x86_64" | "amd64" | "x64" | "i686" | "i586");
+    if triple.contains("apple-darwin") || triple.contains("darwin") {
+        if is_arm {
+            Some(PlatformFamily::MacosArm)
+        } else if is_x86 {
+            Some(PlatformFamily::MacosX86)
+        } else {
+            None
+        }
+    } else if triple.contains("linux") {
+        if is_arm {
+            Some(PlatformFamily::LinuxArm)
+        } else if is_x86 {
+            Some(PlatformFamily::LinuxX86)
+        } else {
+            None
+        }
+    } else if triple.contains("windows") {
+        if is_arm {
+            Some(PlatformFamily::WindowsArm)
+        } else if is_x86 {
+            Some(PlatformFamily::WindowsX86)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// 制品：内容身份（sha256）+ 平台 + 取件地址。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseArtifact {
+    /// 目标平台（target-triple）；无平台概念为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// 制品内容的 sha256（裸小写 hex）—— 制品的稳定身份。
+    pub sha256: String,
+    /// 取件地址 / 来源（URL 或本机路径；由各应用解释）。
+    pub source: String,
+}
+
+impl ReleaseArtifact {
+    pub fn new(
+        platform: Option<impl Into<String>>,
+        sha256: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        Self {
+            platform: platform.map(Into::into),
+            sha256: sha256.into(),
+            source: source.into(),
+        }
+    }
+}
+
+/// 安装包 = 版本 + 多个制品（每个平台一个）。
+///
+/// 键：包 = `version`（在「组件目录」下）；制品 = `sha256`（内容寻址），包内 `platform` 唯一。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleasePackage {
+    pub version: String,
+    pub artifacts: Vec<ReleaseArtifact>,
+}
+
+impl ReleasePackage {
+    pub fn new(version: impl Into<String>, artifacts: Vec<ReleaseArtifact>) -> Self {
+        Self {
+            version: version.into(),
+            artifacts,
+        }
+    }
+
+    /// 取某平台的制品（平台按规范化比较）。
+    pub fn artifact_for(&self, platform: &str) -> Option<&ReleaseArtifact> {
+        let wanted = normalize_platform(platform);
+        self.artifacts.iter().find(|artifact| {
+            artifact
+                .platform
+                .as_deref()
+                .is_some_and(|value| normalize_platform(value) == wanted)
+        })
+    }
+
+    /// 包内**有平台**的制品平台列表（规范化、去重、排序）。
+    pub fn platforms(&self) -> Vec<String> {
+        let mut platforms: Vec<String> = self
+            .artifacts
+            .iter()
+            .filter_map(|artifact| artifact.platform.as_deref())
+            .map(normalize_platform)
+            .collect();
+        platforms.sort();
+        platforms.dedup();
+        platforms
+    }
+
+    /// 是否有多个平台。
+    pub fn is_multi_platform(&self) -> bool {
+        self.platforms().len() > 1
+    }
+
+    /// 平台是否两两不同（无重复平台）。
+    pub fn has_distinct_platforms(&self) -> bool {
+        let total = self
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.platform.is_some())
+            .count();
+        total == self.platforms().len()
+    }
+}
+
+/// 相对必需平台集，缺哪些（规范化后比较；空 `required` 返回空）。
+pub fn missing_platforms(package: &ReleasePackage, required: &[&str]) -> Vec<String> {
+    let have = package.platforms();
+    let mut missing: Vec<String> = required
+        .iter()
+        .map(|value| normalize_platform(value))
+        .filter(|value| !have.contains(value))
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+/// 校验包的平台：无重复平台、且**覆盖**必需平台集。`required` 为空则只查重复。
+pub fn validate_platforms(package: &ReleasePackage, required: &[&str]) -> Result<(), String> {
+    if !package.has_distinct_platforms() {
+        return Err("package has duplicate platform artifacts".to_string());
+    }
+    let missing = missing_platforms(package, required);
+    if !missing.is_empty() {
+        return Err(format!(
+            "missing required platforms: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +392,78 @@ mod tests {
         std::io::Write::write_all(&mut encoder, &tar_bytes).expect("gzip write");
         encoder.finish().expect("gzip finish")
     }
+    #[test]
+    fn release_package_reports_platforms_and_missing() {
+        use PlatformFamily::*;
+        assert_eq!(platform_family("aarch64-apple-darwin"), Some(MacosArm));
+        assert_eq!(platform_family("x86_64-apple-darwin"), Some(MacosX86));
+        // abi 后缀（gnu / musl）不影响家族。
+        assert_eq!(
+            platform_family("aarch64-unknown-linux-musl"),
+            Some(LinuxArm)
+        );
+        assert_eq!(platform_family("x86_64-unknown-linux-gnu"), Some(LinuxX86));
+        assert_eq!(platform_family("x86_64-pc-windows-msvc"), Some(WindowsX86));
+        assert_eq!(platform_family(""), None);
+        assert_eq!(
+            normalize_platform("  AArch64-Apple-Darwin "),
+            "aarch64-apple-darwin"
+        );
+
+        let package = ReleasePackage::new(
+            "v2.2.2-alpha",
+            vec![
+                ReleaseArtifact::new(Some("x86_64-unknown-linux-musl"), "aa", "u1"),
+                ReleaseArtifact::new(Some("aarch64-apple-darwin"), "bb", "u2"),
+                ReleaseArtifact::new(Some("aarch64-unknown-linux-musl"), "cc", "u3"),
+            ],
+        );
+        assert_eq!(
+            package.platforms(),
+            vec![
+                "aarch64-apple-darwin",
+                "aarch64-unknown-linux-musl",
+                "x86_64-unknown-linux-musl"
+            ]
+        );
+        assert!(package.is_multi_platform());
+        assert!(package.has_distinct_platforms());
+        assert_eq!(
+            package
+                .artifact_for("AARCH64-APPLE-DARWIN")
+                .map(|artifact| artifact.sha256.as_str()),
+            Some("bb")
+        );
+
+        let required = [
+            "aarch64-apple-darwin",
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+        ];
+        assert!(validate_platforms(&package, &required).is_ok());
+        // 缺一个 → 报缺件。
+        assert_eq!(
+            missing_platforms(
+                &package,
+                &["aarch64-apple-darwin", "riscv64gc-unknown-linux-gnu"]
+            ),
+            vec!["riscv64gc-unknown-linux-gnu".to_string()]
+        );
+    }
+
+    #[test]
+    fn validate_platforms_rejects_duplicates() {
+        let package = ReleasePackage::new(
+            "v1",
+            vec![
+                ReleaseArtifact::new(Some("aarch64-apple-darwin"), "aa", "u1"),
+                ReleaseArtifact::new(Some("aarch64-apple-darwin"), "bb", "u2"),
+            ],
+        );
+        assert!(!package.has_distinct_platforms());
+        assert!(validate_platforms(&package, &[]).is_err());
+    }
+
     #[test]
     fn read_package_identity_parses_binary_package_dir() {
         let cases = [
@@ -338,12 +600,30 @@ mod tests {
     }
 
     #[test]
-    fn read_package_identity_stops_at_a_partial_dir_identity() {
-        // 目录名里只要能切出版本，就不再回落文件名 —— 即便文件名上有更全的架构。
+    fn read_package_identity_recovers_arch_from_the_source_name() {
+        // 顶层目录只有 `<name>-<version>`（切不出架构）：版本取目录名，**平台回落文件名**。
         let bytes = tar_gz_with_entry("gops-v0.18.2/gops", b"bin");
         assert_eq!(
             read_package_identity("/opt/pkgs/gops-v0.18.2-aarch64-apple-darwin.tar.gz", &bytes),
-            ("v0.18.2".to_string(), String::new())
+            ("v0.18.2".to_string(), "aarch64-apple-darwin".to_string())
+        );
+        // galaxy-ops 同形（带预发布后缀）：版本仍从目录名切，平台从文件名补。
+        let galaxy = tar_gz_with_entry("galaxy-ops-v2.2.1-alpha/galaxy-ops", b"bin");
+        assert_eq!(
+            read_package_identity(
+                "/opt/pkgs/galaxy-ops-v2.2.1-alpha-aarch64-apple-darwin.tar.gz",
+                &galaxy,
+            ),
+            (
+                "v2.2.1-alpha".to_string(),
+                "aarch64-apple-darwin".to_string()
+            )
+        );
+        // 文件名也没有架构（部署栈包）→ 平台仍留空。
+        let stack = tar_gz_with_entry("galaxy-ops-v2.2.1-alpha/galaxy-ops", b"bin");
+        assert_eq!(
+            read_package_identity("/opt/pkgs/galaxy-ops-v2.2.1-alpha.tar.gz", &stack),
+            ("v2.2.1-alpha".to_string(), String::new())
         );
     }
 
