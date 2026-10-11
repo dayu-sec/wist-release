@@ -88,6 +88,29 @@ pub fn read_binary_package_identity(bytes: &[u8]) -> (String, String) {
     (version, arch)
 }
 
+/// 安装包的**包名**（`<name>-<version>[-<triple>]…` 里的 `<name>`）：优先取包内顶层目录名，
+/// 取不到回落来源文件名；都取不到返回空串。
+///
+/// 供「组件 ↔ 包」一致性校验用：正规包的包名即组件名（`wist-agentd-…` → `wist-agentd`）。
+pub fn read_package_name(source: &str, bytes: &[u8]) -> String {
+    if let Some(dir) = first_tar_entry_component(bytes) {
+        let name = package_name_prefix(&dir);
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    package_name_prefix(source_basename(source))
+}
+
+/// 安装包的**包名**的**来源侧**解析：只看来源文件名，**不读包字节**（取不出返回空串）。
+///
+/// 与 [`read_package_name`] 的差别只有一点：不碰包内顶层目录名。用于**下载之前**的
+/// 「组件 ↔ 包」预检 —— 来源文件名就能看出是别的组件时当场拒，省下一次注定失败的下载。
+/// 来源读不出包名（`pkg-<hash>` / 临时名）时返回空串，交给下载后的 [`read_package_name`] 定夺。
+pub fn read_source_package_name(source: &str) -> String {
+    package_name_prefix(source_basename(source))
+}
+
 /// 取来源的末段（路径 / URL 的文件名），并剥掉查询串 / fragment。
 fn source_basename(source: &str) -> &str {
     let without_query = source.split(['?', '#']).next().unwrap_or(source);
@@ -145,6 +168,20 @@ fn parse_package_name(name: &str) -> (String, String) {
     match version_start(version_part) {
         Some(index) => (version_part[index..].to_string(), arch),
         None => (String::new(), String::new()),
+    }
+}
+
+/// 从 `<name>-<version>[-<triple>][<suffix>]` 切出 `<name>`（版本 / 三元组之前的段）；
+/// 切不出返回空串。与 [`parse_package_name`] 共用定位口径（先剥后缀、再去三元组、再找版本）。
+fn package_name_prefix(name: &str) -> String {
+    let name = strip_archive_suffix(name);
+    let version_part = match triple_start(name) {
+        Some(index) => &name[..index],
+        None => name,
+    };
+    match version_start(version_part) {
+        Some(index) => version_part[..index].trim_end_matches('-').to_string(),
+        None => String::new(),
     }
 }
 
@@ -534,6 +571,75 @@ mod tests {
         assert_eq!(
             read_package_identity("/opt/pkgs/thing.tar.gz", b"not a gzip stream"),
             (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn read_package_name_reads_the_component_from_the_package_name() {
+        // 包名 = 版本 / 三元组之前的段，即组件名。
+        for (source, expected) in [
+            (
+                "wist-agentd-v0.2.1-alpha-aarch64-apple-darwin.tar.gz",
+                "wist-agentd",
+            ),
+            (
+                "wist-gwlinkd-v0.7.1-alpha-x86_64-unknown-linux-musl.tar.gz",
+                "wist-gwlinkd",
+            ),
+            (
+                "galaxy-ops-v2.2.3-alpha-aarch64-apple-darwin.tar.gz",
+                "galaxy-ops",
+            ),
+            ("wist-gateway-stack-0.1.17.tar.gz", "wist-gateway-stack"),
+        ] {
+            assert_eq!(read_package_name(source, &[]), expected, "source {source}");
+        }
+        // 取不出包名（临时名 / 哈希名）→ 空串。
+        for source in ["pkg-955e0dc75215c3a6", "/tmp/wic-rel-1728.tar.gz"] {
+            assert_eq!(read_package_name(source, &[]), "", "source {source}");
+        }
+    }
+
+    #[test]
+    fn read_source_package_name_only_looks_at_the_source_name() {
+        for (source, expected) in [
+            (
+                "wist-gwlinkd-v0.7.1-alpha-aarch64-apple-darwin.tar.gz",
+                "wist-gwlinkd",
+            ),
+            (
+                "galaxy-ops-v2.2.3-alpha-x86_64-unknown-linux-musl.tar.gz",
+                "galaxy-ops",
+            ),
+            (
+                // 完整下载地址（含查询串 / fragment）也只看末段。
+                "https://github.com/dayu-sec/wist-gwlinkd/releases/download/v0.7.1-alpha/wist-gwlinkd-v0.7.1-alpha-aarch64-apple-darwin.tar.gz?token=abc#frag",
+                "wist-gwlinkd",
+            ),
+        ] {
+            assert_eq!(
+                read_source_package_name(source),
+                expected,
+                "source {source}"
+            );
+        }
+        // 来源读不出包名（哈希名 / 临时名 / 只有版本）→ 空串（调用方据此决定「放行、待下载后定夺」）。
+        for source in [
+            "pkg-955e0dc75215c3a6",
+            "/tmp/wic-rel-1728.tar.gz",
+            "v2.4.1-aarch64-apple-darwin.tar.gz",
+        ] {
+            assert_eq!(read_source_package_name(source), "", "source {source}");
+        }
+        // 与 `read_package_name` 的唯一差别：**不看包字节** —— 包内是别的组件也照来源文件名给。
+        let bytes = tar_gz_with_entry("wist-agentd-0.2.1-aarch64-apple-darwin/wist-agentd", b"bin");
+        assert_eq!(
+            read_source_package_name("wist-gwlinkd-0.7.1.tar.gz"),
+            "wist-gwlinkd"
+        );
+        assert_eq!(
+            read_package_name("wist-gwlinkd-0.7.1.tar.gz", &bytes),
+            "wist-agentd"
         );
     }
 

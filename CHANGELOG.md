@@ -3,6 +3,16 @@
 本文件记录 `wist-release` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0] - 2026-10-11
+
+### 新增
+
+- **安装包**包名**解析**：`read_package_name(source, bytes)` 与 `read_source_package_name(source)`
+  —— 从包内顶层目录名 / 来源文件名切出**包名**（`<name>-<version>[-<triple>]…` 的 `<name>`）。
+  供「组件 ↔ 包」一致性校验用：`read_source_package_name` 做**下载前**预检（只看来源名、不读包），
+  `read_package_name` 做**下载后**定夺（读包内顶层目录名，取不到回落来源名）。
+  现有 `wist-center` 的发布校验即基于这组口径。
+
 ## [0.5.0] - 2026-10-08
 
 ### 新增
