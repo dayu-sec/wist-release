@@ -75,9 +75,18 @@ jobs:
           echo "File size: $(wc -c < lcov.info) bytes"
 
       - name: Upload to Codecov
+        # Codecov 侧若未接入本仓（上传回 `404 Repository not found`），**不该把 CI 判红**：
+        # 覆盖面是辅助信号，测试 / fmt / clippy / audit 才是门禁。接了 Codecov 的仓
+        # （gateway / center）用同一个 secret；本仓没配也不影响流水线。
+        continue-on-error: true
         uses: codecov/codecov-action@v7
         with:
           files: ./lcov.info
+          flags: unittests
+          name: coverage-${{ github.ref_name }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          verbose: true
           flags: unittests
           name: coverage-${{ github.ref_name }}
           token: ${{ secrets.CODECOV_TOKEN }}
