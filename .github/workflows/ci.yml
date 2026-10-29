@@ -87,8 +87,3 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
           verbose: true
-          flags: unittests
-          name: coverage-${{ github.ref_name }}
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: ${{ github.event_name == 'push' }}
-          verbose: true
