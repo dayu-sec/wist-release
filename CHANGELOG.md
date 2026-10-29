@@ -3,6 +3,34 @@
 本文件记录 `wist-release` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.1] - 2026-10-29
+
+### 新增
+
+- **升级兼容声明与检查**（新模块 `compat`）：发布侧在包里放一份可选的 `compat.json`
+  （包根或第一层目录；文件名也接受 `wist-compat.json`），声明 `requires` / `supports` /
+  `coexists_with` / `compat_mode` / `bridge` / `reversible`。
+  - 读取：`read_manifest_from_tar` / `read_manifest_from_dir` / `read_manifest_from_path`
+    （64 KiB 上限，超出按无声明处理）；
+  - 检查：`check(manifest, package, version, current, checked_at)` 按当前节点掌握的 peer 版本
+    产出 `CompatReport`（`status` + 逐条 `CompatCheck`，可直接进接口 / 页面）；
+  - 严重级别口径：`requires` 不满足 → `error`（默认阻止安装 / 激活 / 发布）；`requires` 不满足
+    但 `coexists_with` 满足且 `compat_mode=true` → `warn`（需开兼容模式）；`supports` 越界、
+    peer 版本未知、manifest 自报身份与包不一致 → `warn`；包内没有声明 → `unknown`
+    （允许，但必须显式显示“未验证兼容性”，**不静默当作没检查**）；
+  - `satisfies(actual, requirement)`：支持 `*`、精确版本、`>=` / `>` / `<=` / `<` / `=` / `==`、
+    `^` / `~`；空格或逗号是 AND、`||` 是 OR；semver 上界按规范计算
+    （`~1` → `<2.0.0`、`^0` → `<1.0.0`、`^0.0` → `<0.1.0`）。
+  - `CompatManifest` **不加** `deny_unknown_fields`：声明文件要向前兼容，新字段不能让老消费者
+    读不懂整份 manifest。
+
+消费方（同批改动）：`wist-center`（发布入库 / 建计划 / 批准 / 包列表）与 `wist-gateway`
+（安装包入库 / 知识库录入与激活 / 计划下发）已接入，检查与展示走同一份 `compat::check`。
+
+### 依赖
+
+- 新增 `serde_json = "1"`（`CompatReport` 的结构化输出与内嵌 `serde_json::Value` 场景）。
+
 ## [0.6.0] - 2026-10-11
 
 ### 新增

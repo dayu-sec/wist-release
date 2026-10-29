@@ -18,6 +18,31 @@
 | --------- | ------------------------------------------------------------------------ |
 | `package` | 安装包内核：来源读取（本机路径 / URL）、摘要校验、身份解析（version/arch）、内容寻址 id、制品命名、路径段安全、摘要与版本口径 |
 | `rollout` | 发布计划的灰度：**切阶段**（「目标 + 阶段数」→ 互不重叠的 1 / 10% / 30% / 70% / 全量）+ **放行**（推进闸门的校验与判定、批次节流、条目状态折叠、确定性 work id） |
+| `compat`  | 包/组件的升级兼容声明：从包内 `compat.json` 读 `requires` / `supports` / `coexists_with`，按当前节点版本判定 `ok / warn / error / unknown`，产出结构化报告 |
+
+### `compat`：包内兼容声明
+
+发布侧在包里放一份**可选**的 `compat.json`（包根或第一层目录；文件名也接受 `wist-compat.json`）：
+
+```json
+{
+  "component": "wist-agentd",
+  "requires":  { "wist-gateway": ">=0.9.0 <0.10.0" },
+  "supports":  { "wist-agentd": ">=0.1.12" },
+  "coexists_with": { "wist-gateway": ">=0.8.0" },
+  "compat_mode": true,
+  "bridge": [],
+  "reversible": false
+}
+```
+
+- `requires` 不满足 → `error`（默认阻止安装/激活/发布），报告会点名“先升级当前节点”；
+- `supports` 不在范围 → `warn`；
+- `requires` 不满足但 `coexists_with` 满足且 `compat_mode=true` → `warn`（需要开兼容模式）；
+- 没有 `compat.json` → `unknown`（允许，但必须显式显示“未验证兼容性”）。
+
+版本范围支持 `*`、`1.2.3`、`>=`、`>`、`<=`、`<`、`=`、`^`、`~`，
+多个条件用空格/逗号（AND），多个候选用 `||`（OR）。
 
 `package` 里除了安装包身份，还有几个**同一套口径只该有一份**的小件：
 
